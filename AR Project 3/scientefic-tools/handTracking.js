@@ -90,6 +90,14 @@ export class HandTracker {
     // Initialize tap state variables for two-finger tap detection
     this.lastIndexFingerAngle = null;
 
+    // Add trajectory control properties
+    this.trajectoryAngle = 45; // Default 45 degrees
+    this.angleAdjustmentStep = 5; // Degrees to adjust per gesture
+    this.minTrajectoryAngle = 0;
+    this.maxTrajectoryAngle = 90;
+    this.lastThumbGestureTime = 0;
+    this.thumbGestureCooldown = 500; // Milliseconds between angle adjustments
+
     this.createStatusOverlay();
   }
 
@@ -102,7 +110,7 @@ export class HandTracker {
     if (typeof this.pickupCallback === 'function') {
       this.pickupCallback();
     }
-    // Otherwise, fall back to the planetEnvironment’s pickupBall():
+    // Otherwise, fall back to the planetEnvironment's pickupBall():
     else if (env && typeof env.pickupBall === 'function') {
       env.pickupBall();
     }
@@ -251,7 +259,7 @@ areAllFingersOpen(landmarks) {
     let normalizedX = (rawX - this.calibration.offsetX) / (this.video.videoWidth * this.calibration.scaleFactorX);
     normalizedX = Math.max(0, Math.min(normalizedX, 1)); // Clamp between 0 and 1
   
-    // Map the normalized x coordinate to a planet index from the SolarSystem’s planetOrder array.
+    // Map the normalized x coordinate to a planet index from the SolarSystem's planetOrder array.
     const order = this.solarSystem.planetOrder;
     // Multiply by the length to get an index, then use floor and clamp if needed.
     const planetIndex = Math.min(Math.floor(normalizedX * order.length), order.length - 1);
@@ -486,6 +494,14 @@ areAllFingersOpen(landmarks) {
     
     if (this.currentGesture === 'rotating' && !this.areAllFingersOpen(landmarks)) {
       this.currentGesture = 'idle';
+    }
+    
+    if (this.isThumbUp(landmarks)) {
+        this.adjustTrajectoryAngle(true); // INCREASE angle (reversed)
+        this.updateGestureOverlay('thumbUp');
+    } else if (this.isThumbDown(landmarks)) {
+        this.adjustTrajectoryAngle(false); // DECREASE angle (reversed)
+        this.updateGestureOverlay('thumbDown');
     }
     
     return this.currentGesture || 'idle';
@@ -987,278 +1003,6 @@ areAllFingersOpen(landmarks) {
     }
   }
 
-  extractFingerData(landmarks) {
-    const fingerDefinitions = [
-      { base: 1, tip: 4 },
-      { base: 5, tip: 8 },
-      { base: 9, tip: 12 },
-      { base: 13, tip: 16 },
-      { base: 17, tip: 20 }
-    ];
-    return fingerDefinitions.map(({ base, tip }) => ({
-      tipPosition: this.convertToNormalizedPosition(landmarks[tip]),
-      basePosition: this.convertToNormalizedPosition(landmarks[base]),
-      extended: this.isFingerExtended(landmarks, base, tip),
-      tipVelocity: this.calculateTipVelocity(tip, landmarks)
-    }));
-  }
-
-  calculateTipVelocity(tipIndex, landmarks) {
-    if (this.lastPositions.length < 2) {
-      return { x: 0, y: 0, z: 0 };
-    }
-    const currentTip = landmarks[tipIndex];
-    const prevTip = this.lastPositions[0][tipIndex];
-    return {
-      x: (currentTip[0] - prevTip[0]) / 0.033,
-      y: (currentTip[1] - prevTip[1]) / 0.033,
-      z: (currentTip[2] - prevTip[2]) / 0.033
-    };
-  }
-
-  convertToNormalizedPosition(point) {
-    return {
-      x: (point[0] / this.video.width) * 2 - 1,
-      y: -((point[1] / this.video.height) * 2 - 1),
-      z: point[2]
-    };
-  }
-
-  calculatePalmNormal(landmarks) {
-    const v1 = [
-      landmarks[5][0] - landmarks[17][0],
-      landmarks[5][1] - landmarks[17][1],
-      landmarks[5][2] - landmarks[17][2]
-    ];
-    const v2 = [
-      landmarks[9][0] - landmarks[0][0],
-      landmarks[9][1] - landmarks[0][1],
-      landmarks[9][2] - landmarks[0][2]
-    ];
-    const normal = {
-      x: v1[1] * v2[2] - v1[2] * v2[1],
-      y: v1[2] * v2[0] - v1[0] * v2[2],
-      z: v1[0] * v2[1] - v1[1] * v2[0]
-    };
-    const length = Math.sqrt(normal.x ** 2 + normal.y ** 2 + normal.z ** 2);
-    if (length > 0) {
-      normal.x /= length;
-      normal.y /= length;
-      normal.z /= length;
-    }
-    return normal;
-  }
-
-  // ---------------------------
-  // Planet Selection (via raycasting, not used for tap mode)
-  // ---------------------------
-  attemptPlanetSelection(indexFinger) {
-    if (!this.solarSystem) return false;
-    const indexNDC = {
-      x: (indexFinger[0] / this.video.width) * 2 - 1,
-      y: -((indexFinger[1] / this.video.height) * 2 - 1)
-    };
-    try {
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(new THREE.Vector2(indexNDC.x, indexNDC.y), this.camera);
-      const planetObjects = [];
-      this.scene.traverse(object => {
-        if (object.isPlanet || (object.userData?.isPlanet) || (object.name && this.isPlanetName(object.name))) {
-          planetObjects.push(object);
-        }
-      });
-      if (planetObjects.length === 0) return false;
-      if (this.debug.enabled) {
-        this.showTapFeedback(indexFinger);
-      }
-      const intersects = raycaster.intersectObjects(planetObjects, true);
-      if (intersects.length > 0) {
-        const selectedPlanet = this.findActualPlanet(intersects[0].object);
-        if (selectedPlanet && this.solarSystem.enterPlanet) {
-          try {
-            this.solarSystem.enterPlanet(selectedPlanet);
-            return true;
-          } catch (error) {
-            console.error('Error entering planet:', error);
-          }
-        }
-      }
-    } catch (error) {
-      console.error("Planet selection error:", error);
-    }
-    return false;
-  }
-
-  isPlanetName(name) {
-    const planetNames = ['mercury', 'venus', 'earth', 'mars', 'jupiter', 'saturn', 'uranus', 'neptune', 'sun'];
-    return planetNames.includes(name.toLowerCase());
-  }
-
-  findActualPlanet(object) {
-    let current = object;
-    while (current && !current.isPlanet && !(current.userData?.isPlanet) && current.parent) {
-      current = current.parent;
-    }
-    return (current?.isPlanet || current?.userData?.isPlanet) ? current : object;
-  }
-
-  // ---------------------------
-  // Debug Visualization
-  // ---------------------------
-  createStatusOverlay() {
-    if (this.debug.gestureOverlay) return;
-    this.debug.gestureOverlay = document.createElement('div');
-    Object.assign(this.debug.gestureOverlay.style, {
-      position: 'fixed',
-      bottom: '140px',
-      right: '180px',
-      padding: '5px 10px',
-      borderRadius: '5px',
-      color: 'white',
-      background: 'rgba(0,0,0,0.7)',
-      zIndex: '1000',
-      fontSize: '12px'
-    });
-    this.debug.gestureOverlay.textContent = 'No gesture detected';
-    document.body.appendChild(this.debug.gestureOverlay);
-  }
-
-  updateGestureOverlay(gesture) {
-    if (!this.debug.gestureOverlay) return;
-    if (gesture && gesture !== this.debug.lastDetectedGesture) {
-      this.debug.gestureOverlay.textContent = `Gesture: ${gesture}`;
-      this.debug.gestureOverlay.style.background = 'rgba(0,128,0,0.7)';
-      setTimeout(() => {
-        if (this.debug.gestureOverlay) {
-          this.debug.gestureOverlay.style.background = 'rgba(0,0,0,0.7)';
-        }
-      }, 1000);
-    } else if (!gesture) {
-      this.debug.gestureOverlay.textContent = 'No gesture detected';
-    }
-    this.debug.lastDetectedGesture = gesture;
-  }
-
-  createDebugVisuals() {
-    for (let i = 0; i < 21; i++) {
-      const geometry = new THREE.SphereGeometry(0.02, 8, 8);
-      const material = new THREE.MeshBasicMaterial({ color: this.getLandmarkColor(i) });
-      const marker = new THREE.Mesh(geometry, material);
-      marker.visible = false;
-      this.scene.add(marker);
-      this.debug.handMarkers.push(marker);
-    }
-    const indicatorGeom = new THREE.SphereGeometry(0.04, 16, 16);
-    const indicatorMat = new THREE.MeshBasicMaterial({ color: 0xff0000 });
-    this.debug.gestureIndicator = new THREE.Mesh(indicatorGeom, indicatorMat);
-    this.debug.gestureIndicator.visible = false;
-    this.scene.add(this.debug.gestureIndicator);
-  }
-
-  getLandmarkColor(index) {
-    switch (index) {
-      case 0: return 0xff0000;
-      case 4: return 0x00ff00;
-      case 8: return 0x0000ff;
-      default: return 0xffff00;
-    }
-  }
-
-  updateDebugVisuals(landmarks, gesture) {
-    for (let i = 0; i < landmarks.length && i < this.debug.handMarkers.length; i++) {
-      const marker = this.debug.handMarkers[i];
-      const screenPos = this.landmarkToScreenPosition(landmarks[i]);
-      marker.position.copy(screenPos);
-      marker.visible = true;
-      marker.material.color.set(this.getLandmarkColor(i));
-    }
-    if (this.debug.gestureIndicator && gesture) {
-      const palmPos = this.landmarkToScreenPosition(landmarks[0]);
-      this.debug.gestureIndicator.position.copy(palmPos);
-      this.debug.gestureIndicator.visible = true;
-      this.debug.gestureIndicator.material.color.set(this.getGestureColor(gesture));
-      const scale = 1 + 0.2 * Math.sin(performance.now() / 200);
-      this.debug.gestureIndicator.scale.set(scale, scale, scale);
-    }
-    if (landmarks[8]) {
-      const indexPos = this.landmarkToScreenPosition(landmarks[8]);
-      if (!this.debug.indexLabel) {
-        this.debug.indexLabel = document.createElement('div');
-        this.debug.indexLabel.style.position = 'absolute';
-        this.debug.indexLabel.style.color = 'white';
-        this.debug.indexLabel.style.fontSize = '12px';
-        document.body.appendChild(this.debug.indexLabel);
-      }
-      const smoothed = this.getSmoothedIndexFinger(landmarks[8]);
-      let normalizedX = (smoothed[0] - this.calibration.offsetX) / (this.video.videoWidth * this.calibration.scaleFactorX);
-      normalizedX = Math.min(Math.max(normalizedX, 0), 1);
-      const order = this.solarSystem?.planetOrder || [];
-      const planetIndex = order.length ? Math.floor(normalizedX * order.length) : -1;
-      this.debug.indexLabel.innerText = `NormX: ${normalizedX.toFixed(2)}\nPlanetIdx: ${planetIndex}`;
-      this.debug.indexLabel.style.left = `${indexPos.x * window.innerWidth / 2 + window.innerWidth / 2}px`;
-      this.debug.indexLabel.style.top = `${-indexPos.y * window.innerHeight / 2 + window.innerHeight / 2 - 20}px`;
-    }
-  }
-
-  getGestureColor(gesture) {
-    switch (gesture) {
-      case 'Pinch/Zoom': return 0x00ff00;
-      case 'Tap': return 0x0000ff;
-      case 'Grab': return 0xff00ff;
-      case 'Throw': return 0xff0000;
-      default: return 0xffff00;
-    }
-  }
-
-  landmarkToScreenPosition(landmark) {
-    const xNorm = (landmark[0] / this.video.width) * 2 - 1;
-    const yNorm = -(landmark[1] / this.video.height) * 2 + 1;
-    const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(new THREE.Vector2(xNorm, yNorm), this.camera);
-    const distance = 5;
-    const position = new THREE.Vector3();
-    position.copy(this.camera.position).add(raycaster.ray.direction.multiplyScalar(distance));
-    return position;
-  }
-
-  showTapFeedback(indexFinger) {
-    if (!this.debug.gestureIndicator) return;
-    const tapPos = this.landmarkToScreenPosition(indexFinger);
-    this.debug.gestureIndicator.position.copy(tapPos);
-    this.debug.gestureIndicator.material.color.set(0x00ffff);
-    this.debug.gestureIndicator.visible = true;
-    const originalScale = this.debug.gestureIndicator.scale.clone();
-    const startTime = performance.now();
-    const duration = 500;
-    const animatePulse = (time) => {
-      const elapsed = time - startTime;
-      const progress = Math.min(1.0, elapsed / duration);
-      const scale = progress < 0.5 ? 1 + progress * 2 : 3 - (progress - 0.5) * 4;
-      this.debug.gestureIndicator.scale.set(scale, scale, scale);
-      if (progress < 1.0) {
-        requestAnimationFrame(animatePulse);
-      } else {
-        this.debug.gestureIndicator.scale.copy(originalScale);
-      }
-    };
-    requestAnimationFrame(animatePulse);
-  }
-
-  hideDebugVisuals() {
-    this.debug.handMarkers.forEach(marker => marker.visible = false);
-    if (this.debug.gestureIndicator) {
-      this.debug.gestureIndicator.visible = false;
-    }
-  }
-
-  cleanupDebugVisuals() {
-    this.debug.handMarkers.forEach(marker => this.scene.remove(marker));
-    this.debug.handMarkers = [];
-    if (this.debug.gestureIndicator) {
-      this.scene.remove(this.debug.gestureIndicator);
-      this.debug.gestureIndicator = null;
-    }
-  }
   isFingerExtended(landmarks, baseIndex, tipIndex) {
     // If checking the thumb, use a slightly different calculation.
     if (tipIndex === 4) {
@@ -1310,5 +1054,74 @@ areAllFingersOpen(landmarks) {
       console.error('Tracking error:', error);
       this.handleTrackingError();
     }
+  }
+
+  // Add method to detect thumb position
+  isThumbUp(landmarks) {
+    if (!landmarks || landmarks.length < 21) return false;
+    
+    const thumb_tip = landmarks[4];
+    const thumb_base = landmarks[2];
+    const wrist = landmarks[0];
+    
+    // Check if thumb is pointing upward
+    return thumb_tip[1] < thumb_base[1] && thumb_tip[1] < wrist[1];
+  }
+
+  isThumbDown(landmarks) {
+    if (!landmarks || landmarks.length < 21) return false;
+    
+    const thumb_tip = landmarks[4];
+    const thumb_base = landmarks[2];
+    const wrist = landmarks[0];
+    
+    // Check if thumb is pointing downward
+    return thumb_tip[1] > thumb_base[1] && thumb_tip[1] > wrist[1];
+  }
+
+  // Add trajectory angle adjustment method
+  adjustTrajectoryAngle(isIncreasing) {
+    const now = Date.now();
+    if (now - this.lastThumbGestureTime < this.thumbGestureCooldown) {
+        return; // Prevent too frequent adjustments
+    }
+    
+    if (isIncreasing) {
+        this.trajectoryAngle = Math.min(this.trajectoryAngle + this.angleAdjustmentStep, this.maxTrajectoryAngle);
+    } else {
+        this.trajectoryAngle = Math.max(this.trajectoryAngle - this.angleAdjustmentStep, this.minTrajectoryAngle);
+    }
+    
+    this.lastThumbGestureTime = now;
+    
+    // Update the UI to show current angle
+    this.updateTrajectoryAngleDisplay();
+    
+    // If there's a planet environment, update its throw angle
+    if (this.solarSystem?.planetEnvironment) {
+        this.solarSystem.planetEnvironment.setThrowAngle(this.trajectoryAngle);
+    }
+  }
+
+  // Add method to update UI with current angle
+  updateTrajectoryAngleDisplay() {
+    const angleDisplay = document.getElementById('trajectory-angle-display') || this.createTrajectoryAngleDisplay();
+    angleDisplay.textContent = `Trajectory Angle: ${Math.round(this.trajectoryAngle)}°`;
+  }
+
+  // Create UI element for angle display
+  createTrajectoryAngleDisplay() {
+    const display = document.createElement('div');
+    display.id = 'trajectory-angle-display';
+    display.style.position = 'fixed';
+    display.style.bottom = '20px';
+    display.style.right = '20px';
+    display.style.padding = '10px';
+    display.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+    display.style.color = 'white';
+    display.style.borderRadius = '5px';
+    display.style.fontFamily = 'Arial, sans-serif';
+    document.body.appendChild(display);
+    return display;
   }
 }

@@ -77,7 +77,9 @@ export class PlanetEnvironment {
             'a': false,
             'd': false,
             ' ': false,  // jump
-            'e': false   // pickup/hold ball
+            'e': false,  // pickup/hold ball
+            'ArrowUp': false,
+            'ArrowDown': false
         };
 
         // Trajectory visualization properties.
@@ -152,6 +154,28 @@ export class PlanetEnvironment {
 
         window.addEventListener('keydown', this.onProjectileKeyDown.bind(this));
         window.addEventListener('keyup', this.onProjectileKeyUp.bind(this));
+
+        // Add min and max throw angles
+        this.minThrowAngle = 0;
+        this.maxThrowAngle = Math.PI / 2; // 90 degrees
+        
+        // Add trajectory control properties
+        this.trajectoryAngle = 45; // Default 45 degrees
+        this.angleAdjustmentStep = 5; // Degrees to adjust per keypress
+        this.minTrajectoryAngle = 0;
+        this.maxTrajectoryAngle = 90;
+        
+        // Add keyboard state for trajectory control
+        this.keyStates = {
+            'w': false,
+            's': false,
+            'a': false,
+            'd': false,
+            ' ': false,  // jump
+            'e': false,  // pickup/hold ball
+            'ArrowUp': false,
+            'ArrowDown': false
+        };
     }
 
     // ---------------------- New Helper Functions ----------------------
@@ -229,7 +253,7 @@ export class PlanetEnvironment {
                 this.secondaryTrajectoryLine = new THREE.Line(geometry, material);
                 this.secondaryTrajectoryLine.computeLineDistances();
                 
-                // Disable frustum culling if you’re worried about it disappearing
+                // Disable frustum culling if you're worried about it disappearing
                 // this.secondaryTrajectoryLine.frustumCulled = false;
         
                 this.scene.add(this.secondaryTrajectoryLine);
@@ -1221,9 +1245,9 @@ export class PlanetEnvironment {
             // Log the event for debugging
             console.log("Grab gesture detected: Picking up the ball");
             
-            // Set the ball state so that it’s held
+            // Set the ball state so that it's held
             this.isHoldingBall = true;
-            this.isThrown = false; // Ensure we’re not in a throw state
+            this.isThrown = false; // Ensure we're not in a throw state
             
             // Attach the ball to the character's hand.
             // This helper method should position the ball relative to the character (for example, to the left hand).
@@ -1651,7 +1675,7 @@ onMouseMove(event) {
         this.physicsWorld.addBody(this.characterBody);
     }   
 
-    // Helper to dispose recursively of an object’s resources.
+    // Helper to dispose recursively of an object's resources.
 disposeHierarchy(parent, disposeMaterials = true) {
     const children = parent.children.slice(); // Copy the children array.
     for (let child of children) {
@@ -2053,37 +2077,87 @@ disposeHierarchy(parent, disposeMaterials = true) {
     }
     // Handles projectile motion key down events (adjust force/angle/throw)
     onProjectileKeyDown(event) {
-        const key = event.key.toLowerCase();
-        if (this.projectileKeyStates.hasOwnProperty(key)) {
-            this.projectileKeyStates[key] = true;
-            switch (key) {
-                case 'arrowup':
-                    this.throwAngle = Math.min(Math.PI / 2, this.throwAngle + 0.05);
-                    break;
-                case 'arrowdown':
-                    this.throwAngle = Math.max(0.05, this.throwAngle - 0.05);
-                    break;
-                case 'w':
-                    this.throwForce = Math.min(50, this.throwForce + 1);
-                    break;
-                case ' ':
-                    if (this.isHoldingBall && !this.ballThrown) {
-                        this.throwBall();
-                    }
-                    break;
-            }
-            if (this.isHoldingBall) {
-                this.updateTrajectoryPreview();
-                this.updatePhysicsCalculations();
-            }
+        const key = event.key;
+        if (this.keyStates.hasOwnProperty(key)) {
+            this.keyStates[key] = true;
+        }
+
+        // Handle trajectory angle adjustments
+        if (key === 'ArrowUp') {
+            // Decrease angle to make ball go more forward/horizontal
+            const newAngle = Math.max(this.minTrajectoryAngle, this.throwAngle - this.angleAdjustmentStep);
+            this.setThrowAngle(newAngle);
+        } else if (key === 'ArrowDown') {
+            // Increase angle to make ball go more upward/vertical
+            const newAngle = Math.min(this.maxTrajectoryAngle, this.throwAngle + this.angleAdjustmentStep);
+            this.setThrowAngle(newAngle);
         }
     }
     
     // Handles projectile motion key up events
     onProjectileKeyUp(event) {
-        const key = event.key.toLowerCase();
-        if (this.projectileKeyStates.hasOwnProperty(key)) {
-            this.projectileKeyStates[key] = false;
+        const key = event.key;
+        if (this.keyStates.hasOwnProperty(key)) {
+            this.keyStates[key] = false;
         }
+    }
+
+    // Add new method to set throw angle
+    setThrowAngle(angleDegrees) {
+        // Convert degrees to radians and clamp between min and max
+        this.throwAngle = Math.max(this.minTrajectoryAngle, Math.min(angleDegrees, this.maxTrajectoryAngle));
+        
+        // Update stored angle for physics calculations
+        this.storedThrowAngle = (this.throwAngle * Math.PI) / 180;
+        
+        // Update trajectory preview if we're currently aiming
+        if (this.isAiming) {
+            this.updateTrajectoryPreview();
+        }
+        
+        // Update physics calculations display
+        this.updatePhysicsCalculations();
+        
+        // Update the angle display if it exists
+        if (this.secondaryAngleLabel) {
+            this.secondaryAngleLabel.textContent = `Angle: ${Math.round(this.throwAngle)}°`;
+        }
+
+        // Display angle change feedback
+        this.showAngleChangeNotification();
+    }
+
+    // Add method to show angle change notification
+    showAngleChangeNotification() {
+        const notification = document.getElementById('angle-notification') || this.createAngleNotification();
+        notification.textContent = `Trajectory Angle: ${Math.round(this.throwAngle)}°`;
+        notification.style.opacity = '1';
+        
+        // Fade out after 1.5 seconds
+        setTimeout(() => {
+            notification.style.opacity = '0';
+        }, 1500);
+    }
+
+    // Add method to create angle change notification element
+    createAngleNotification() {
+        const notification = document.createElement('div');
+        notification.id = 'angle-notification';
+        Object.assign(notification.style, {
+            position: 'fixed',
+            bottom: '50px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            color: 'white',
+            padding: '10px 20px',
+            borderRadius: '5px',
+            fontSize: '16px',
+            transition: 'opacity 0.3s ease',
+            opacity: '0',
+            zIndex: '1000'
+        });
+        document.body.appendChild(notification);
+        return notification;
     }
 }
